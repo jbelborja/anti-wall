@@ -343,13 +343,20 @@
 <script type="module">
   import { Readability } from 'https://cdn.jsdelivr.net/npm/@mozilla/readability@0.5.0/+esm';
 
-  // ── CORS proxy list ────────────────────────────────
-  // These relay requests to sites that block direct browser/CORS access.
-  const PROXIES = [
-    url => `https://corsproxy.io/?${encodeURIComponent(url)}`,
-    url => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
-    url => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}`,
-  ];
+  // ── Proxy list ─────────────────────────────────────
+  // The Cloudflare Worker (first entry) sends real browser headers and
+  // bypasses bot-detection. Update WORKER_URL after deploying the worker.
+  const WORKER_URL = ''; // e.g. 'https://anti-wall.YOUR-NAME.workers.dev'
+
+  function buildProxies(targetUrl) {
+    const enc = encodeURIComponent(targetUrl);
+    const list = [];
+    if (WORKER_URL) list.push(`${WORKER_URL}?url=${enc}`);
+    list.push(`https://corsproxy.io/?${enc}`);
+    list.push(`https://api.allorigins.win/raw?url=${enc}`);
+    list.push(`https://api.codetabs.com/v1/proxy?quest=${enc}`);
+    return list;
+  }
 
   // ── DOM refs ───────────────────────────────────────
   const urlForm       = document.getElementById('urlForm');
@@ -365,7 +372,6 @@
   const articleByline = document.getElementById('articleByline');
   const articleBody   = document.getElementById('articleBody');
 
-  // ── Helpers ────────────────────────────────────────
   function showStatus(msg, isError = false) {
     statusEl.className = 'status visible ' + (isError ? 'error' : 'loading');
     spinner.style.display = isError ? 'none' : 'block';
@@ -380,99 +386,84 @@
     catch { return url; }
   }
 
-  // Returns true if the HTML is a Cloudflare/bot-challenge page
-  function isBotBlocker(html) {
-    const s = html.slice(0, 8000).toLowerCase();
-    return (
-      s.includes('enable javascript') ||
-      s.includes('please enable js') ||
-      s.includes('disable any ad blocker') ||
-      s.includes('checking your browser') ||
-      s.includes('cf-browser-verification') ||
-      s.includes('just a moment') ||
-      s.includes('_cf_chl') ||
-      s.includes('challenge-platform') ||
-      (s.includes('cloudflare') && html.length < 12000)
-    );
+  // Detect pages that are NOT the article we wanted
+  function isBadResponse(html, targetUrl) {
+    if (!html || html.length < 500) return true;
+    const s = html.slice(0, 6000).toLowerCase();
+    const targetHost = extractHostname(targetUrl);
+    // Bot-blockers
+    if (s.includes('enable javascript')) return true;
+    if (s.includes('please enable js')) return true;
+    if (s.includes('disable any ad blocker')) return true;
+    if (s.includes('checking your browser')) return true;
+    if (s.includes('_cf_chl') || s.includes('challenge-platform')) return true;
+    if (s.includes('geo.captcha-delivery.com')) return true;
+    if (s.includes('datadome')) return true;
+    // Proxy returned its own homepage instead of the target
+    if (!s.includes(targetHost) && s.includes('corsproxy')) return true;
+    return false;
   }
 
-  // Fetch URL through each CORS proxy in sequence.
-  // Short 8 s timeout per proxy so we fail fast.
-  async function fetchViaProxies(targetUrl, label) {
+  async function fetchViaProxies(targetUrl) {
+    const proxies = buildProxies(targetUrl);
     let lastErr;
-    for (let i = 0; i < PROXIES.length; i++) {
+    for (let i = 0; i < proxies.length; i++) {
+      const label = i === 0 && WORKER_URL ? 'worker' : `proxy ${WORKER_URL ? i : i+1}/${proxies.length}`;
       try {
-        statusMsg.textContent = `${label} — proxy ${i + 1}/${PROXIES.length}…`;
-        const res = await fetch(PROXIES[i](targetUrl), {
-          signal: AbortSignal.timeout(8000)
-        });
+        statusMsg.textContent = `Trying ${label}...`;
+        const res = await fetch(proxies[i], { signal: AbortSignal.timeout(10000) });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const text = await res.text();
-        if (!text || text.length < 200) throw new Error('Empty response');
-        if (isBotBlocker(text)) throw new Error('Bot-blocker page');
+        if (isBadResponse(text, targetUrl)) throw new Error('Bad response (bot block or wrong page)');
         return text;
       } catch (e) {
         lastErr = e;
-        console.warn(`[proxy ${i+1}] ${e.message}`);
+        console.warn(`[${label}]`, e.message);
       }
     }
     throw lastErr ?? new Error('All proxies failed');
   }
 
-  // ── Wayback Machine fallback ───────────────────────
-  // 1. Use /wayback/available (CORS-enabled) to find the closest snapshot URL.
-  // 2. Fetch the snapshot directly — archive.org sends Access-Control-Allow-Origin: *,
-  //    so no proxy is needed for the second step.
+  // Wayback Machine — only useful for articles > a few hours old
   async function fetchFromWayback(targetUrl) {
-    statusMsg.textContent = 'Checking Wayback Machine…';
-
-    // Step 1 — find snapshot URL (CORS-enabled endpoint)
-    const availUrl =
-      'https://archive.org/wayback/available?url=' + encodeURIComponent(targetUrl);
+    statusMsg.textContent = 'Checking Wayback Machine...';
+    const availUrl = 'https://archive.org/wayback/available?url=' + encodeURIComponent(targetUrl);
     const availRes = await fetch(availUrl, { signal: AbortSignal.timeout(10000) });
     if (!availRes.ok) throw new Error(`Wayback API HTTP ${availRes.status}`);
-
     const data = await availRes.json();
     const snapshot = data?.archived_snapshots?.closest;
-    if (!snapshot?.url) throw new Error('No Wayback Machine snapshot found for this URL');
+    if (!snapshot?.url) throw new Error('No Wayback Machine snapshot found (article may be too new)');
 
-    // Force HTTPS — archive.org links are sometimes returned as http://
     const snapshotUrl = snapshot.url.replace(/^http:\/\//, 'https://');
-    const ts = snapshot.timestamp; // yyyymmddhhmmss
-    statusMsg.textContent =
-      `Found snapshot from ${ts.slice(0,4)}-${ts.slice(4,6)}-${ts.slice(6,8)}, loading…`;
+    const ts = snapshot.timestamp;
+    statusMsg.textContent = `Loading archive from ${ts.slice(0,4)}-${ts.slice(4,6)}-${ts.slice(6,8)}...`;
 
-    // Step 2 — fetch the snapshot. Try direct first (CORS: *), then via proxies.
-    let html;
+    // Try direct (archive.org allows CORS), then fall through proxies
     try {
       const res = await fetch(snapshotUrl, { signal: AbortSignal.timeout(12000) });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      html = await res.text();
-      if (!html || html.length < 200) throw new Error('Empty direct response');
-    } catch (directErr) {
-      console.warn('Direct Wayback fetch failed, trying via proxy:', directErr.message);
-      html = await fetchViaProxies(snapshotUrl, 'Wayback via proxy');
+      const html = await res.text();
+      if (html && html.length > 500) return { html, timestamp: ts };
+      throw new Error('Empty response');
+    } catch {
+      const html = await fetchViaProxies(snapshotUrl);
+      return { html, timestamp: ts };
     }
-
-    return { html, timestamp: ts };
   }
 
-  // ── Main orchestrator ──────────────────────────────
+  // ── Main ───────────────────────────────────────────
   async function fetchArticle(url) {
     fetchBtn.disabled = true;
     articleEl.classList.remove('visible');
     emptyState.style.display = 'none';
-    showStatus('Fetching article…');
+    showStatus('Fetching article...');
 
     let html, sourceNote = '';
 
-    // Strategy 1 — direct CORS proxies (fast; works for most sites)
     try {
-      html = await fetchViaProxies(url, 'Fetching');
+      html = await fetchViaProxies(url);
     } catch (directErr) {
-      console.info('Direct proxies blocked. Trying Wayback Machine…');
-
-      // Strategy 2 — Wayback Machine archive
+      console.info('Direct fetch failed, trying Wayback...', directErr.message);
       try {
         const wb = await fetchFromWayback(url);
         html = wb.html;
@@ -481,16 +472,16 @@
       } catch (wbErr) {
         showError(
           `Could not fetch the article.\n` +
-          `Proxies: ${directErr.message}\n` +
-          `Wayback: ${wbErr.message}`
+          `Live: ${directErr.message}\n` +
+          `Archive: ${wbErr.message}\n\n` +
+          (WORKER_URL ? '' : 'Tip: deploy the Cloudflare Worker (see README) for better site support.')
         );
         fetchBtn.disabled = false;
         return;
       }
     }
 
-    // ── Parse ──────────────────────────────────────
-    showStatus('Parsing article…');
+    showStatus('Parsing article...');
     let parsed;
     try {
       const doc = new DOMParser().parseFromString(html, 'text/html');
@@ -499,18 +490,17 @@
       doc.head.prepend(base);
       parsed = new Readability(doc).parse();
     } catch (err) {
-      showError(`Could not parse the article content. (${err.message})`);
+      showError(`Parse error: ${err.message}`);
       fetchBtn.disabled = false;
       return;
     }
 
     if (!parsed || !parsed.content) {
-      showError('No readable article content found at this URL. Try a different link.');
+      showError('No readable article content found. The site may require login.');
       fetchBtn.disabled = false;
       return;
     }
 
-    // ── Render ─────────────────────────────────────
     hideStatus();
     articleSource.textContent = extractHostname(url);
     articleTitle.textContent  = parsed.title || '(No title)';
@@ -522,16 +512,12 @@
       articleByline.appendChild(s);
     }
     const origLink = document.createElement('a');
-    origLink.href = url;
-    origLink.target = '_blank';
-    origLink.rel = 'noopener';
+    origLink.href = url; origLink.target = '_blank'; origLink.rel = 'noopener';
     origLink.textContent = 'Original article';
     articleByline.appendChild(origLink);
-
     if (sourceNote) {
       const note = document.createElement('span');
       note.textContent = sourceNote;
-      note.title = 'Article served from Wayback Machine archive because the live site blocked direct access.';
       note.style.cssText = 'font-size:0.75rem;opacity:0.6;cursor:default;';
       articleByline.appendChild(note);
     }
@@ -546,7 +532,6 @@
     fetchBtn.disabled = false;
   }
 
-  // ── URL from query string ──────────────────────────
   function init() {
     const qUrl = new URLSearchParams(window.location.search).get('url');
     if (qUrl) { urlInput.value = qUrl; fetchArticle(qUrl); }
@@ -559,7 +544,6 @@
     history.pushState(null, '', '?url=' + encodeURIComponent(url));
     fetchArticle(url);
   });
-
   document.querySelectorAll('.example-link').forEach(btn => {
     btn.addEventListener('click', () => {
       const url = btn.dataset.url;
@@ -568,7 +552,6 @@
       fetchArticle(url);
     });
   });
-
   window.addEventListener('popstate', init);
   init();
 </script>

@@ -1,61 +1,84 @@
 # 📰 Anti-Wall
 
-A lightweight, distraction-free article reader you can host on GitHub Pages.
-Paste any article URL and read it cleanly — no ads, no popups, no paywalls (soft ones at least).
+A lightweight, distraction-free article reader hosted on GitHub Pages.
+Paste any article URL and read it cleanly — no ads, no popups, no soft paywalls.
 
-**[→ Live demo](https://your-username.github.io/anti-wall/)**
+**[→ Live demo](https://jbelborja.github.io/anti-wall/)**
 
 ## How it works
 
 1. You enter a URL
-2. The app fetches the page via a CORS proxy (with automatic fallback)
-3. [Mozilla Readability](https://github.com/mozilla/readability) extracts the article content
-4. The clean article is rendered in a distraction-free reader view
+2. The app fetches the page via a proxy with browser-like headers
+3. [Mozilla Readability](https://github.com/mozilla/readability) extracts the article
+4. Clean article is rendered in a reader view
 
-Everything runs in the browser — no server, no database, no backend.
+Everything runs in the browser — no server, no database (optional Cloudflare Worker for tough sites).
 
-## Features
+## Why a Cloudflare Worker is needed for some sites
 
-- 🔗 **Shareable URLs** — `?url=https://...` links open the article directly
-- 🌙 **Dark mode** — follows system preference
-- ♻️ **Proxy fallback** — tries corsproxy.io → allorigins.win → codetabs.com
-- 📱 **Responsive** — works on mobile
+Sites like **elpais.com** use DataDome bot protection. They fingerprint the HTTP request and reject
+anything that doesn't look like a real browser session — including all public CORS proxies.
+
+A **Cloudflare Worker** runs on Cloudflare's edge network with real IPs and can send proper
+browser headers, which bypasses most bot-detection systems. The free tier (100,000 req/day) is
+more than enough for personal use.
+
+## Deploy the Cloudflare Worker (recommended)
+
+### Step 1 — Create the Worker
+
+1. Go to [dash.cloudflare.com](https://dash.cloudflare.com/) → **Workers & Pages** → **Create**
+2. Choose **"Hello World"** template → give it a name (e.g. `anti-wall`)
+3. Replace the entire editor content with the code from [`worker/index.js`](worker/index.js)
+4. Click **Deploy**
+5. Copy the worker URL, e.g. `https://anti-wall.YOUR-NAME.workers.dev`
+
+### Step 2 — Add your GitHub Pages domain to the allowlist
+
+In [`worker/index.js`](worker/index.js), update the `ALLOWED_ORIGINS` array:
+```js
+const ALLOWED_ORIGINS = [
+  'https://YOUR-USERNAME.github.io',
+  'http://localhost',
+];
+```
+
+### Step 3 — Set the worker URL in the app
+
+In [`index.html`](index.html), find this line near the top of the `<script>` block:
+```js
+const WORKER_URL = ''; // e.g. 'https://anti-wall.YOUR-NAME.workers.dev'
+```
+Replace the empty string with your worker URL:
+```js
+const WORKER_URL = 'https://anti-wall.YOUR-NAME.workers.dev';
+```
+
+Then push — GitHub Actions redeploys automatically.
 
 ## Deploy to GitHub Pages
 
-### Automatic (recommended)
+1. Fork / clone this repo
+2. Go to **Settings → Pages → Source → GitHub Actions**
+3. Push to `main` — the Action deploys automatically
 
-1. Fork / clone this repository
-2. Go to your repo **Settings → Pages**
-3. Under *Source*, select **GitHub Actions**
-4. Push to `main` — the workflow deploys automatically
+## Proxy fallback chain
 
-### Manual one-time setup
-
-```bash
-git clone https://github.com/YOUR_USERNAME/anti-wall.git
-cd anti-wall
-git push origin main   # triggers the Action
-```
-
-The GitHub Action (`/.github/workflows/deploy.yml`) runs on every push to `main`
-and deploys the static files using the official `actions/deploy-pages` action.
-
-## Limitations
-
-- **Hard paywalls** (server-side): if the site only sends a teaser and requires a login token,
-  the proxy will fetch the same partial content.
-- **Rate limits**: public CORS proxies have quotas; don't use for high-traffic production sites.
-- **Blocked proxies**: some sites detect and block proxy IPs.
+| Priority | Source | Works for |
+|---|---|---|
+| 1 | Your Cloudflare Worker | Most sites including DataDome-protected |
+| 2 | corsproxy.io | Sites without aggressive bot detection |
+| 3 | allorigins.win | Fallback |
+| 4 | codetabs.com | Fallback |
+| 5 | Wayback Machine | Articles archived > a few hours ago |
 
 ## Tech stack
 
 | Tool | Role |
 |---|---|
-| HTML + CSS + Vanilla JS | Frontend (no framework) |
+| HTML + CSS + Vanilla JS | Frontend (zero dependencies, zero build step) |
 | [Mozilla Readability](https://github.com/mozilla/readability) | Article extraction |
-| [jsDelivr CDN](https://www.jsdelivr.com/) | Readability.js delivery |
-| corsproxy.io / allorigins.win | CORS proxy |
+| Cloudflare Workers (optional) | Browser-header proxy |
 | GitHub Actions | CI/CD |
 | GitHub Pages | Hosting |
 
