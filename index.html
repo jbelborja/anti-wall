@@ -277,6 +277,16 @@
       margin: 1.5em auto;
       display: block;
     }
+    .article-body video,
+    .article-body iframe {
+      width: 100%;
+      aspect-ratio: 16 / 9;
+      border: none;
+      border-radius: var(--radius);
+      margin: 1.5em 0;
+      display: block;
+      background: #000;
+    }
     .article-body figure { margin: 1.5em 0; }
     .article-body figcaption {
       font-size: 0.82rem;
@@ -741,7 +751,34 @@
 
     const tmp = document.createElement('div');
     tmp.innerHTML = fixMojibake(parsed.content);
-    tmp.querySelectorAll('script, style, iframe, form, input, button').forEach(el => el.remove());
+    tmp.querySelectorAll('script, style, form, input, button').forEach(el => el.remove());
+
+    // Sanitize iframes: keep recognized video players, discard ads/trackers
+    tmp.querySelectorAll('iframe').forEach(iframe => {
+      const src = (iframe.getAttribute('src') || '').toLowerCase();
+      const isVideo = src.includes('youtube') ||
+                      src.includes('youtu.be') ||
+                      src.includes('vimeo') ||
+                      src.includes('dailymotion') ||
+                      src.includes('brightcove') ||
+                      src.includes('player') ||
+                      src.includes('video') ||
+                      src.includes('uecdn') ||
+                      src.includes('elmundo');
+      if (!isVideo) {
+        iframe.remove();
+      } else {
+        iframe.setAttribute('loading', 'lazy');
+        iframe.setAttribute('allowfullscreen', 'true');
+        iframe.setAttribute('referrerpolicy', 'no-referrer');
+      }
+    });
+
+    // Ensure HTML5 video elements have user controls
+    tmp.querySelectorAll('video').forEach(vid => {
+      vid.setAttribute('controls', 'true');
+      vid.setAttribute('preload', 'metadata');
+    });
 
     // Resolve lazy-loaded images, absolute URLs, and hotlink protection
     tmp.querySelectorAll('img').forEach(img => {
