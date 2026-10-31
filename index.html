@@ -378,17 +378,35 @@
     catch { return url; }
   }
 
+  // Detect Cloudflare / JS-challenge / bot-blocker pages
+  function isBotBlocker(html) {
+    const lower = html.toLowerCase();
+    return (
+      lower.includes('enable javascript') ||
+      lower.includes('please enable js') ||
+      lower.includes('disable any ad blocker') ||
+      lower.includes('checking your browser') ||
+      lower.includes('cf-browser-verification') ||
+      lower.includes('just a moment...') ||
+      lower.includes('_cf_chl') ||
+      lower.includes('challenge-platform') ||
+      (lower.includes('cloudflare') && lower.length < 12000)
+    );
+  }
+
+  // Fetch via CORS proxies; throws if all blocked/failed
   async function fetchWithProxies(targetUrl) {
     let lastErr;
     for (let i = 0; i < PROXIES.length; i++) {
       try {
-        statusMsg.textContent = `Fetching via proxy ${i + 1} of ${PROXIES.length}…`;
+        statusMsg.textContent = `Trying proxy ${i + 1} of ${PROXIES.length}...`;
         const res = await fetch(PROXIES[i](targetUrl), {
           signal: AbortSignal.timeout(15000)
         });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const text = await res.text();
         if (!text || text.length < 200) throw new Error('Empty response');
+        if (isBotBlocker(text)) throw new Error('Bot-blocker page returned by proxy');
         return text;
       } catch (e) {
         lastErr = e;
@@ -398,22 +416,82 @@
     throw lastErr ?? new Error('All proxies failed');
   }
 
+  // Fetch the closest Wayback Machine snapshot.
+  // archive.org CDX API supports CORS natively.
+  async function fetchFromWayback(targetUrl) {
+    statusMsg.textContent = 'Trying Wayback Machine...';
+
+    const cdxUrl =
+      'https://web.archive.org/cdx/search/cdx' +
+      '?url=' + encodeURIComponent(targetUrl) +
+      '&output=json&fl=timestamp&limit=1&filter=statuscode:200&sort=reverse&fastLatest=true';
+
+    const cdxRes = await fetch(cdxUrl, { signal: AbortSignal.timeout(10000) });
+    if (!cdxRes.ok) throw new Error(`CDX API HTTP ${cdxRes.status}`);
+
+    const cdxData = await cdxRes.json();
+    if (!cdxData || cdxData.length < 2) {
+      throw new Error('No Wayback Machine snapshot found for this URL');
+    }
+
+    const timestamp = cdxData[1][0];
+    const archiveUrl = `https://web.archive.org/web/${timestamp}/${targetUrl}`;
+    const d = timestamp;
+    statusMsg.textContent = `Found snapshot from ${d.slice(0,4)}-${d.slice(4,6)}-${d.slice(6,8)}, loading...`;
+
+    // Fetch the archived page via proxy (archive.org HTML pages are not CORS-enabled)
+    let html;
+    let lastErr;
+    for (let i = 0; i < PROXIES.length; i++) {
+      try {
+        const res = await fetch(PROXIES[i](archiveUrl), {
+          signal: AbortSignal.timeout(20000)
+        });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        html = await res.text();
+        if (html && html.length > 200) break;
+        throw new Error('Empty response');
+      } catch (e) {
+        lastErr = e;
+        console.warn(`Wayback proxy ${i + 1} failed:`, e.message);
+      }
+    }
+    if (!html) throw lastErr ?? new Error('Could not fetch Wayback snapshot');
+    return { html, timestamp };
+  }
+
   async function fetchArticle(url) {
     fetchBtn.disabled = true;
     articleEl.classList.remove('visible');
     emptyState.style.display = 'none';
-    showStatus('Fetching article…');
+    showStatus('Fetching article...');
 
     let html;
+    let sourceNote = '';
+
+    // Strategy 1: direct CORS proxies
     try {
       html = await fetchWithProxies(url);
-    } catch (err) {
-      showError(`Could not fetch the article. The site may block proxies or require login. (${err.message})`);
-      fetchBtn.disabled = false;
-      return;
+    } catch (directErr) {
+      console.info('Direct proxies failed, trying Wayback Machine...', directErr.message);
+
+      // Strategy 2: Wayback Machine
+      try {
+        const wb = await fetchFromWayback(url);
+        html = wb.html;
+        const d = wb.timestamp;
+        sourceNote = `via Wayback Machine (${d.slice(0,4)}-${d.slice(4,6)}-${d.slice(6,8)})`;
+      } catch (wbErr) {
+        showError(
+          `Could not fetch the article through any source. ` +
+          `Direct: ${directErr.message} | Wayback: ${wbErr.message}`
+        );
+        fetchBtn.disabled = false;
+        return;
+      }
     }
 
-    showStatus('Parsing article…');
+    showStatus('Parsing article...');
     let parsed;
     try {
       const doc = new DOMParser().parseFromString(html, 'text/html');
@@ -447,8 +525,15 @@
     origLink.href = url;
     origLink.target = '_blank';
     origLink.rel = 'noopener';
-    origLink.textContent = '↗ Original article';
+    origLink.textContent = 'Original article';
     articleByline.appendChild(origLink);
+
+    if (sourceNote) {
+      const note = document.createElement('span');
+      note.textContent = sourceNote;
+      note.style.cssText = 'font-size:0.75rem;opacity:0.6;';
+      articleByline.appendChild(note);
+    }
 
     const tmp = document.createElement('div');
     tmp.innerHTML = parsed.content;
@@ -477,7 +562,6 @@
     fetchArticle(url);
   });
 
-  // Example links
   document.querySelectorAll('.example-link').forEach(btn => {
     btn.addEventListener('click', () => {
       const url = btn.dataset.url;
