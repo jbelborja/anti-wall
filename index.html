@@ -3,6 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="referrer" content="no-referrer" />
   <title>Anti-Wall · Article Reader</title>
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📰</text></svg>" />
   <style>
@@ -464,6 +465,85 @@
     return false;
   }
 
+  // ── Charset & Mojibake repair ──────────────────────
+  const win1252Map = {
+    0x20AC: 0x80, 0x201A: 0x82, 0x0192: 0x83, 0x201E: 0x84, 0x2026: 0x85,
+    0x2020: 0x86, 0x2021: 0x87, 0x02C6: 0x88, 0x2030: 0x89, 0x0160: 0x8A,
+    0x2039: 0x8B, 0x0152: 0x8C, 0x017D: 0x8E, 0x2018: 0x91, 0x2019: 0x92,
+    0x201C: 0x93, 0x201D: 0x94, 0x2022: 0x95, 0x2013: 0x96, 0x2014: 0x97,
+    0x02DC: 0x98, 0x2122: 0x99, 0x0161: 0x9A, 0x203A: 0x9B, 0x0153: 0x9C,
+    0x017E: 0x9E, 0x0178: 0x9F
+  };
+  const win1252Chars = Object.keys(win1252Map).map(k => String.fromCharCode(k)).join('');
+  const mojibakePattern = new RegExp(
+    '(?:[\\u00C2\\u00C3][\\u0080-\\u00BF]|\\u00E2[\\u0080-\\u00BF' + win1252Chars + ']{2})+',
+    'g'
+  );
+
+  function fixMojibake(text) {
+    if (!text || !/[\u00C2\u00C3\u00E2]/.test(text)) return text;
+    return text.replace(mojibakePattern, match => {
+      try {
+        const bytes = [];
+        for (let i = 0; i < match.length; i++) {
+          const code = match.charCodeAt(i);
+          if (code in win1252Map) {
+            bytes.push(win1252Map[code]);
+          } else if (code <= 0xFF) {
+            bytes.push(code);
+          } else {
+            return match;
+          }
+        }
+        return new TextDecoder('utf-8', { fatal: true }).decode(new Uint8Array(bytes));
+      } catch (_) {
+        return match;
+      }
+    });
+  }
+
+  // Robust response decoder handling ISO-8859-15/1, Windows-1252, and UTF-8
+  async function decodeResponse(res) {
+    const buffer = await res.arrayBuffer();
+    const bytes = new Uint8Array(buffer);
+
+    // Peek at the beginning in ASCII to check for meta charset
+    const peek = new TextDecoder('ascii').decode(bytes.subarray(0, 3000)).toLowerCase();
+
+    let charset = '';
+    const m1 = peek.match(/<meta[^>]+charset=["']?([a-zA-Z0-9_-]+)/i);
+    const m2 = peek.match(/<meta[^>]+content=["'][^"']*charset=([a-zA-Z0-9_-]+)/i);
+    if (m1) charset = m1[1];
+    else if (m2) charset = m2[1];
+    else {
+      const ct = res.headers.get('content-type') || '';
+      const m3 = ct.match(/charset=([a-zA-Z0-9_-]+)/i);
+      if (m3) charset = m3[1];
+    }
+
+    if (charset === 'iso-8859-1' || charset === 'iso-8859-15' || charset === 'latin1') {
+      charset = 'windows-1252';
+    }
+
+    let text = '';
+    if (charset && charset !== 'utf-8' && charset !== 'utf8') {
+      try {
+        text = new TextDecoder(charset).decode(buffer);
+      } catch (_) {
+        text = new TextDecoder('windows-1252').decode(buffer);
+      }
+    } else {
+      // Try UTF-8 with fatal: true to detect legacy non-UTF-8 single-byte accents
+      try {
+        text = new TextDecoder('utf-8', { fatal: true }).decode(buffer);
+      } catch (_) {
+        text = new TextDecoder('windows-1252').decode(buffer);
+      }
+    }
+
+    return fixMojibake(text);
+  }
+
   async function fetchViaProxies(targetUrl) {
     const proxies = buildProxies(targetUrl);
     let lastErr;
@@ -473,7 +553,7 @@
         statusMsg.textContent = `Trying ${label}...`;
         const res = await fetch(proxies[i], { signal: AbortSignal.timeout(10000) });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const text = await res.text();
+        const text = await decodeResponse(res);
         if (isBadResponse(text, targetUrl)) throw new Error('Bad response (bot block or wrong page)');
         return text;
       } catch (e) {
@@ -495,7 +575,7 @@
       signal: AbortSignal.timeout(12000),
     });
     if (!res.ok) throw new Error(`Jina HTTP ${res.status}`);
-    const text = await res.text();
+    const text = await decodeResponse(res);
     if (!text || text.length < 300) throw new Error('Jina response too short');
     return text;
   }
@@ -515,23 +595,30 @@
       .map(block => {
         block = block.trim();
         if (!block) return '';
+
+        // If block is an image or contains an image
+        if (block.includes('![')) {
+          const replaced = block.replace(/!\[(.*?)\]\((.*?)\)/g, (match, alt, src) => {
+            let absSrc = src;
+            try { absSrc = new URL(src, url).href; } catch (_) {}
+            return `<figure><img src="${escapeHtml(absSrc)}" alt="${escapeHtml(alt)}" referrerpolicy="no-referrer" loading="lazy"><figcaption>${escapeHtml(alt)}</figcaption></figure>`;
+          });
+          if (replaced.startsWith('<figure>')) return replaced;
+        }
+
         if (block.startsWith('### ')) return `<h3>${escapeHtml(block.slice(4))}</h3>`;
         if (block.startsWith('## '))  return `<h2>${escapeHtml(block.slice(3))}</h2>`;
         if (block.startsWith('# '))   return `<h1>${escapeHtml(block.slice(2))}</h1>`;
         if (block.startsWith('> '))   return `<blockquote>${escapeHtml(block.slice(2))}</blockquote>`;
-        if (block.startsWith('![')) {
-          const m = block.match(/!\[(.*?)\]\((.*?)\)/);
-          if (m) return `<figure><img src="${escapeHtml(m[2])}" alt="${escapeHtml(m[1])}"><figcaption>${escapeHtml(m[1])}</figcaption></figure>`;
-        }
         return `<p>${escapeHtml(block).replace(/\n/g, '<br>')}</p>`;
       })
       .filter(Boolean)
       .join('');
 
     return {
-      title: title || '(No title)',
-      content: html,
-      byline: extractHostname(url),
+      title: fixMojibake(title || '(No title)'),
+      content: fixMojibake(html),
+      byline: fixMojibake(extractHostname(url)),
     };
   }
 
@@ -552,7 +639,7 @@
     try {
       const res = await fetch(snapshotUrl, { signal: AbortSignal.timeout(12000) });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const html = await res.text();
+      const html = await decodeResponse(res);
       if (html && html.length > 500) return { html, timestamp: ts };
       throw new Error('Empty response');
     } catch {
@@ -633,12 +720,12 @@
 
     hideStatus();
     articleSource.textContent = extractHostname(url);
-    articleTitle.textContent  = parsed.title || '(No title)';
+    articleTitle.textContent  = fixMojibake(parsed.title || '(No title)');
 
     articleByline.innerHTML = '';
     if (parsed.byline) {
       const s = document.createElement('span');
-      s.textContent = parsed.byline;
+      s.textContent = fixMojibake(parsed.byline);
       articleByline.appendChild(s);
     }
     const origLink = document.createElement('a');
@@ -653,8 +740,55 @@
     }
 
     const tmp = document.createElement('div');
-    tmp.innerHTML = parsed.content;
+    tmp.innerHTML = fixMojibake(parsed.content);
     tmp.querySelectorAll('script, style, iframe, form, input, button').forEach(el => el.remove());
+
+    // Resolve lazy-loaded images, absolute URLs, and hotlink protection
+    tmp.querySelectorAll('img').forEach(img => {
+      const realSrc = img.getAttribute('data-src') ||
+                      img.getAttribute('data-original') ||
+                      img.getAttribute('data-lazy-src') ||
+                      img.getAttribute('data-actualsrc') ||
+                      img.getAttribute('data-url') ||
+                      img.getAttribute('src');
+
+      if (realSrc && !realSrc.startsWith('data:image')) {
+        try {
+          img.src = new URL(realSrc, url).href;
+        } catch (_) {}
+      }
+
+      const realSrcset = img.getAttribute('data-srcset') || img.getAttribute('srcset');
+      if (realSrcset) {
+        try {
+          const resolvedSrcset = realSrcset.split(',').map(part => {
+            const trimmed = part.trim();
+            const spaceIdx = trimmed.lastIndexOf(' ');
+            if (spaceIdx === -1) return new URL(trimmed, url).href;
+            const s = trimmed.slice(0, spaceIdx);
+            const d = trimmed.slice(spaceIdx);
+            return `${new URL(s, url).href} ${d.trim()}`;
+          }).join(', ');
+          img.setAttribute('srcset', resolvedSrcset);
+        } catch (_) {}
+      }
+
+      img.setAttribute('referrerpolicy', 'no-referrer');
+      img.setAttribute('loading', 'lazy');
+    });
+
+    // Resolve relative hyperlinks
+    tmp.querySelectorAll('a').forEach(a => {
+      const href = a.getAttribute('href');
+      if (href && !href.startsWith('#') && !href.startsWith('mailto:') && !href.startsWith('javascript:')) {
+        try {
+          a.href = new URL(href, url).href;
+          a.target = '_blank';
+          a.rel = 'noopener noreferrer';
+        } catch (_) {}
+      }
+    });
+
     articleBody.innerHTML = tmp.innerHTML;
 
     articleEl.classList.add('visible');
