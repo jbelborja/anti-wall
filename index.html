@@ -1,0 +1,494 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Anti-Wall · Article Reader</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📰</text></svg>" />
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:       #f5f3ee;
+      --surface:  #ffffff;
+      --border:   #e0dcd4;
+      --accent:   #c0392b;
+      --text:     #1a1a1a;
+      --muted:    #6b6b6b;
+      --max-w:    720px;
+      --radius:   8px;
+      --font-sans: 'Georgia', 'Times New Roman', serif;
+      --font-ui:  system-ui, -apple-system, sans-serif;
+    }
+
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg:      #1a1917;
+        --surface: #252420;
+        --border:  #3a3830;
+        --text:    #e8e4dc;
+        --muted:   #9a9690;
+      }
+    }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--font-ui);
+      min-height: 100vh;
+    }
+
+    header {
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      padding: 1rem 1.5rem;
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+      position: sticky;
+      top: 0;
+      z-index: 100;
+    }
+
+    .logo {
+      font-size: 1.4rem;
+      font-weight: 700;
+      color: var(--accent);
+      text-decoration: none;
+      letter-spacing: -0.5px;
+      white-space: nowrap;
+    }
+
+    .url-bar {
+      display: flex;
+      flex: 1;
+      gap: 0.5rem;
+    }
+
+    .url-input {
+      flex: 1;
+      padding: 0.55rem 0.85rem;
+      border: 1.5px solid var(--border);
+      border-radius: var(--radius);
+      font-family: var(--font-ui);
+      font-size: 0.9rem;
+      background: var(--bg);
+      color: var(--text);
+      outline: none;
+      transition: border-color 0.15s;
+      min-width: 0;
+    }
+    .url-input:focus { border-color: var(--accent); }
+    .url-input::placeholder { color: var(--muted); }
+
+    .btn-fetch {
+      padding: 0.55rem 1.1rem;
+      background: var(--accent);
+      color: #fff;
+      border: none;
+      border-radius: var(--radius);
+      font-family: var(--font-ui);
+      font-size: 0.9rem;
+      font-weight: 600;
+      cursor: pointer;
+      white-space: nowrap;
+      transition: opacity 0.15s;
+    }
+    .btn-fetch:hover { opacity: 0.88; }
+    .btn-fetch:disabled { opacity: 0.5; cursor: default; }
+
+    main {
+      max-width: var(--max-w);
+      margin: 0 auto;
+      padding: 2rem 1.5rem 5rem;
+    }
+
+    .empty-state {
+      text-align: center;
+      padding: 5rem 1rem;
+      color: var(--muted);
+    }
+    .empty-state .icon { font-size: 3.5rem; margin-bottom: 1rem; }
+    .empty-state h2 { font-family: var(--font-ui); font-weight: 600; font-size: 1.2rem; margin-bottom: 0.5rem; color: var(--text); }
+    .empty-state p  { font-size: 0.92rem; line-height: 1.6; }
+
+    .examples {
+      margin-top: 1.5rem;
+      display: flex;
+      flex-direction: column;
+      gap: 0.4rem;
+      align-items: center;
+    }
+    .examples span { font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.06em; }
+    .example-link {
+      font-size: 0.85rem;
+      color: var(--accent);
+      text-decoration: none;
+      cursor: pointer;
+      background: none;
+      border: none;
+      padding: 0;
+      font-family: inherit;
+    }
+    .example-link:hover { text-decoration: underline; }
+
+    .status {
+      display: none;
+      align-items: center;
+      gap: 0.75rem;
+      padding: 1rem 1.25rem;
+      border-radius: var(--radius);
+      font-size: 0.9rem;
+      margin-bottom: 1.5rem;
+    }
+    .status.visible { display: flex; }
+    .status.loading {
+      background: #eef3ff;
+      color: #1a3a7a;
+      border: 1px solid #c5d5f8;
+    }
+    .status.error {
+      background: #fef2f2;
+      color: #7f1d1d;
+      border: 1px solid #fca5a5;
+    }
+
+    @media (prefers-color-scheme: dark) {
+      .status.loading { background: #1a2540; color: #7da8f8; border-color: #2a3f6a; }
+      .status.error   { background: #2a1010; color: #f87171; border-color: #6a2020; }
+    }
+
+    .spinner {
+      width: 18px; height: 18px;
+      border: 2.5px solid currentColor;
+      border-top-color: transparent;
+      border-radius: 50%;
+      animation: spin 0.7s linear infinite;
+      flex-shrink: 0;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    .article { display: none; }
+    .article.visible { display: block; }
+
+    .article-meta {
+      margin-bottom: 2rem;
+      padding-bottom: 1.5rem;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .article-source {
+      font-size: 0.78rem;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--accent);
+      margin-bottom: 0.6rem;
+    }
+
+    .article-title {
+      font-family: var(--font-sans);
+      font-size: clamp(1.5rem, 4vw, 2.1rem);
+      line-height: 1.25;
+      font-weight: 700;
+      margin-bottom: 0.75rem;
+    }
+
+    .article-byline {
+      font-size: 0.87rem;
+      color: var(--muted);
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      flex-wrap: wrap;
+    }
+
+    .article-byline a {
+      color: var(--muted);
+      text-decoration: none;
+      font-size: 0.78rem;
+      border: 1px solid var(--border);
+      padding: 0.2rem 0.55rem;
+      border-radius: 99px;
+      transition: border-color 0.15s;
+    }
+    .article-byline a:hover { border-color: var(--accent); color: var(--accent); }
+
+    .article-body {
+      font-family: var(--font-sans);
+      font-size: 1.1rem;
+      line-height: 1.8;
+      color: var(--text);
+    }
+
+    .article-body p   { margin-bottom: 1.3em; }
+    .article-body h1,
+    .article-body h2,
+    .article-body h3,
+    .article-body h4  {
+      font-family: var(--font-sans);
+      margin: 2em 0 0.6em;
+      line-height: 1.25;
+    }
+    .article-body h2 { font-size: 1.4rem; }
+    .article-body h3 { font-size: 1.2rem; }
+    .article-body blockquote {
+      margin: 1.5em 0;
+      padding: 0.75em 1.25em;
+      border-left: 3px solid var(--accent);
+      color: var(--muted);
+      font-style: italic;
+    }
+    .article-body img {
+      max-width: 100%;
+      height: auto;
+      border-radius: var(--radius);
+      margin: 1.5em auto;
+      display: block;
+    }
+    .article-body figure { margin: 1.5em 0; }
+    .article-body figcaption {
+      font-size: 0.82rem;
+      color: var(--muted);
+      text-align: center;
+      margin-top: 0.4em;
+      font-family: var(--font-ui);
+    }
+    .article-body a { color: var(--accent); }
+    .article-body ul,
+    .article-body ol { padding-left: 1.5em; margin-bottom: 1.3em; }
+    .article-body li { margin-bottom: 0.4em; }
+    .article-body table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-bottom: 1.3em;
+      font-size: 0.9rem;
+    }
+    .article-body th,
+    .article-body td { border: 1px solid var(--border); padding: 0.5rem 0.75rem; text-align: left; }
+    .article-body th { background: var(--bg); font-weight: 600; }
+
+    footer {
+      position: fixed;
+      bottom: 0; left: 0; right: 0;
+      background: var(--surface);
+      border-top: 1px solid var(--border);
+      padding: 0.55rem 1.5rem;
+      font-size: 0.75rem;
+      color: var(--muted);
+      text-align: center;
+      font-family: var(--font-ui);
+    }
+    footer a { color: var(--muted); }
+
+    @media (max-width: 600px) {
+      header { flex-direction: column; align-items: stretch; }
+      .logo  { text-align: center; }
+    }
+  </style>
+</head>
+<body>
+
+<header>
+  <a class="logo" href="/">📰 Anti-Wall</a>
+  <form class="url-bar" id="urlForm">
+    <input
+      id="urlInput"
+      class="url-input"
+      type="url"
+      placeholder="Paste an article URL and press Read…"
+      required
+      autocomplete="off"
+      spellcheck="false"
+    />
+    <button class="btn-fetch" id="fetchBtn" type="submit">Read</button>
+  </form>
+</header>
+
+<main>
+  <div class="empty-state" id="emptyState">
+    <div class="icon">📖</div>
+    <h2>Read any article, distraction-free</h2>
+    <p>Paste the URL of any article above.<br>
+       Anti-Wall fetches the page and shows only the content,<br>
+       stripping ads, popups, and soft paywalls.</p>
+    <div class="examples">
+      <span>Try an example →</span>
+      <button class="example-link" data-url="https://elpais.com/opinion/2026-10-31/el-gobierno-cae-por-su-propio-peso.html">
+        elpais.com — El Gobierno cae por su propio peso
+      </button>
+    </div>
+  </div>
+
+  <div class="status" id="status">
+    <div class="spinner" id="spinner"></div>
+    <span id="statusMsg">Fetching article…</span>
+  </div>
+
+  <article class="article" id="article">
+    <div class="article-meta">
+      <div class="article-source" id="articleSource"></div>
+      <h1 class="article-title" id="articleTitle"></h1>
+      <div class="article-byline" id="articleByline"></div>
+    </div>
+    <div class="article-body" id="articleBody"></div>
+  </article>
+</main>
+
+<footer>
+  Anti-Wall uses <a href="https://github.com/mozilla/readability" target="_blank" rel="noopener">Mozilla Readability</a>
+  to extract article content. Content belongs to original publishers.
+</footer>
+
+<script type="module">
+  import { Readability } from 'https://cdn.jsdelivr.net/npm/@mozilla/readability@0.5.0/+esm';
+
+  const PROXIES = [
+    url => `https://corsproxy.io/?${encodeURIComponent(url)}`,
+    url => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
+    url => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}`,
+  ];
+
+  const urlForm       = document.getElementById('urlForm');
+  const urlInput      = document.getElementById('urlInput');
+  const fetchBtn      = document.getElementById('fetchBtn');
+  const emptyState    = document.getElementById('emptyState');
+  const statusEl      = document.getElementById('status');
+  const spinner       = document.getElementById('spinner');
+  const statusMsg     = document.getElementById('statusMsg');
+  const articleEl     = document.getElementById('article');
+  const articleSource = document.getElementById('articleSource');
+  const articleTitle  = document.getElementById('articleTitle');
+  const articleByline = document.getElementById('articleByline');
+  const articleBody   = document.getElementById('articleBody');
+
+  function showStatus(msg, isError = false) {
+    statusEl.className = 'status visible ' + (isError ? 'error' : 'loading');
+    spinner.style.display = isError ? 'none' : 'block';
+    statusMsg.textContent = msg;
+    articleEl.classList.remove('visible');
+    emptyState.style.display = 'none';
+  }
+
+  function showError(msg) { showStatus(msg, true); }
+  function hideStatus()   { statusEl.classList.remove('visible'); }
+
+  function extractHostname(url) {
+    try { return new URL(url).hostname.replace(/^www\./, ''); }
+    catch { return url; }
+  }
+
+  async function fetchWithProxies(targetUrl) {
+    let lastErr;
+    for (let i = 0; i < PROXIES.length; i++) {
+      try {
+        statusMsg.textContent = `Fetching via proxy ${i + 1} of ${PROXIES.length}…`;
+        const res = await fetch(PROXIES[i](targetUrl), {
+          signal: AbortSignal.timeout(15000)
+        });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const text = await res.text();
+        if (!text || text.length < 200) throw new Error('Empty response');
+        return text;
+      } catch (e) {
+        lastErr = e;
+        console.warn(`Proxy ${i + 1} failed:`, e.message);
+      }
+    }
+    throw lastErr ?? new Error('All proxies failed');
+  }
+
+  async function fetchArticle(url) {
+    fetchBtn.disabled = true;
+    articleEl.classList.remove('visible');
+    emptyState.style.display = 'none';
+    showStatus('Fetching article…');
+
+    let html;
+    try {
+      html = await fetchWithProxies(url);
+    } catch (err) {
+      showError(`Could not fetch the article. The site may block proxies or require login. (${err.message})`);
+      fetchBtn.disabled = false;
+      return;
+    }
+
+    showStatus('Parsing article…');
+    let parsed;
+    try {
+      const doc = new DOMParser().parseFromString(html, 'text/html');
+      const base = doc.createElement('base');
+      base.href = url;
+      doc.head.prepend(base);
+      parsed = new Readability(doc).parse();
+    } catch (err) {
+      showError(`Could not parse the article content. (${err.message})`);
+      fetchBtn.disabled = false;
+      return;
+    }
+
+    if (!parsed || !parsed.content) {
+      showError('No readable article content found at this URL. Try a different link.');
+      fetchBtn.disabled = false;
+      return;
+    }
+
+    hideStatus();
+    articleSource.textContent = extractHostname(url);
+    articleTitle.textContent  = parsed.title || '(No title)';
+
+    articleByline.innerHTML = '';
+    if (parsed.byline) {
+      const s = document.createElement('span');
+      s.textContent = parsed.byline;
+      articleByline.appendChild(s);
+    }
+    const origLink = document.createElement('a');
+    origLink.href = url;
+    origLink.target = '_blank';
+    origLink.rel = 'noopener';
+    origLink.textContent = '↗ Original article';
+    articleByline.appendChild(origLink);
+
+    const tmp = document.createElement('div');
+    tmp.innerHTML = parsed.content;
+    tmp.querySelectorAll('script, style, iframe, form, input, button').forEach(el => el.remove());
+    articleBody.innerHTML = tmp.innerHTML;
+
+    articleEl.classList.add('visible');
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+    fetchBtn.disabled = false;
+  }
+
+  function init() {
+    const params = new URLSearchParams(window.location.search);
+    const qUrl   = params.get('url');
+    if (qUrl) {
+      urlInput.value = qUrl;
+      fetchArticle(qUrl);
+    }
+  }
+
+  urlForm.addEventListener('submit', e => {
+    e.preventDefault();
+    const url = urlInput.value.trim();
+    if (!url) return;
+    history.pushState(null, '', '?url=' + encodeURIComponent(url));
+    fetchArticle(url);
+  });
+
+  // Example links
+  document.querySelectorAll('.example-link').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const url = btn.dataset.url;
+      urlInput.value = url;
+      history.pushState(null, '', '?url=' + encodeURIComponent(url));
+      fetchArticle(url);
+    });
+  });
+
+  window.addEventListener('popstate', init);
+  init();
+</script>
+</body>
+</html>
