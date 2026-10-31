@@ -151,12 +151,42 @@
       background: #fef2f2;
       color: #7f1d1d;
       border: 1px solid #fca5a5;
+      display: flex;
+      flex-direction: column;
+      align-items: flex-start;
+      gap: 0.6rem;
     }
 
     @media (prefers-color-scheme: dark) {
       .status.loading { background: #1a2540; color: #7da8f8; border-color: #2a3f6a; }
       .status.error   { background: #2a1010; color: #f87171; border-color: #6a2020; }
     }
+
+    .fallback-links {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 0.5rem;
+      margin-top: 0.4rem;
+    }
+    .fallback-links span {
+      font-size: 0.8rem;
+      font-weight: 600;
+      opacity: 0.8;
+    }
+    .fallback-btn {
+      display: inline-flex;
+      align-items: center;
+      padding: 0.3rem 0.65rem;
+      border-radius: 4px;
+      font-size: 0.78rem;
+      font-weight: 600;
+      text-decoration: none;
+      color: #ffffff;
+      background: var(--accent);
+      transition: opacity 0.15s;
+    }
+    .fallback-btn:hover { opacity: 0.85; }
 
     .spinner {
       width: 18px; height: 18px;
@@ -343,19 +373,14 @@
 <script type="module">
   import { Readability } from 'https://cdn.jsdelivr.net/npm/@mozilla/readability@0.5.0/+esm';
 
-  // ── Proxy list ─────────────────────────────────────
-  // The Cloudflare Worker (first entry) sends real browser headers and
-  // bypasses bot-detection. Update WORKER_URL after deploying the worker.
-  const WORKER_URL = ''; // e.g. 'https://anti-wall.YOUR-NAME.workers.dev'
-
+  // ── Proxy list (100% client-side via public CORS proxies) ──
   function buildProxies(targetUrl) {
     const enc = encodeURIComponent(targetUrl);
-    const list = [];
-    if (WORKER_URL) list.push(`${WORKER_URL}?url=${enc}`);
-    list.push(`https://corsproxy.io/?${enc}`);
-    list.push(`https://api.allorigins.win/raw?url=${enc}`);
-    list.push(`https://api.codetabs.com/v1/proxy?quest=${enc}`);
-    return list;
+    return [
+      `https://corsproxy.io/?${enc}`,
+      `https://api.allorigins.win/raw?url=${enc}`,
+      `https://api.codetabs.com/v1/proxy?quest=${enc}`,
+    ];
   }
 
   // ── DOM refs ───────────────────────────────────────
@@ -379,11 +404,46 @@
     articleEl.classList.remove('visible');
     emptyState.style.display = 'none';
   }
-  function showError(msg) { showStatus(msg, true); }
+
+  function showError(msg, targetUrl = '') {
+    statusEl.className = 'status visible error';
+    spinner.style.display = 'none';
+    statusMsg.innerHTML = '';
+
+    const textDiv = document.createElement('div');
+    textDiv.style.whiteSpace = 'pre-line';
+    textDiv.textContent = msg;
+    statusMsg.appendChild(textDiv);
+
+    if (targetUrl) {
+      const linksContainer = document.createElement('div');
+      linksContainer.className = 'fallback-links';
+      linksContainer.innerHTML = `
+        <span>Try alternative bypass services:</span>
+        <a class="fallback-btn" href="https://archive.today/newest/${encodeURIComponent(targetUrl)}" target="_blank" rel="noopener">Archive.today ↗</a>
+        <a class="fallback-btn" href="https://12ft.io/${encodeURIComponent(targetUrl)}" target="_blank" rel="noopener">12ft.io ↗</a>
+        <a class="fallback-btn" href="https://web.archive.org/web/*/${encodeURIComponent(targetUrl)}" target="_blank" rel="noopener">Wayback Machine ↗</a>
+      `;
+      statusMsg.appendChild(linksContainer);
+    }
+
+    articleEl.classList.remove('visible');
+    emptyState.style.display = 'none';
+  }
+
   function hideStatus()   { statusEl.classList.remove('visible'); }
   function extractHostname(url) {
     try { return new URL(url).hostname.replace(/^www\./, ''); }
     catch { return url; }
+  }
+
+  function escapeHtml(str) {
+    return str
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#039;');
   }
 
   // Detect pages that are NOT the article we wanted
@@ -408,7 +468,7 @@
     const proxies = buildProxies(targetUrl);
     let lastErr;
     for (let i = 0; i < proxies.length; i++) {
-      const label = i === 0 && WORKER_URL ? 'worker' : `proxy ${WORKER_URL ? i : i+1}/${proxies.length}`;
+      const label = `proxy ${i + 1}/${proxies.length}`;
       try {
         statusMsg.textContent = `Trying ${label}...`;
         const res = await fetch(proxies[i], { signal: AbortSignal.timeout(10000) });
@@ -421,10 +481,61 @@
         console.warn(`[${label}]`, e.message);
       }
     }
-    throw lastErr ?? new Error('All proxies failed');
+    throw lastErr ?? new Error('All CORS proxies failed');
   }
 
-  // Wayback Machine — only useful for articles > a few hours old
+  // Jina Reader — Free AI reader proxy without API key
+  async function fetchFromJina(targetUrl) {
+    statusMsg.textContent = 'Trying reader service (Jina)...';
+    const res = await fetch(`https://r.jina.ai/${targetUrl}`, {
+      headers: {
+        'Accept': 'text/html, text/plain',
+        'X-Return-Format': 'html',
+      },
+      signal: AbortSignal.timeout(12000),
+    });
+    if (!res.ok) throw new Error(`Jina HTTP ${res.status}`);
+    const text = await res.text();
+    if (!text || text.length < 300) throw new Error('Jina response too short');
+    return text;
+  }
+
+  function parseJinaArticle(rawText, url) {
+    const titleMatch = rawText.match(/^Title:\s*(.+)$/m);
+    const title = titleMatch ? titleMatch[1].trim() : '';
+
+    let content = rawText;
+    const splitIdx = rawText.indexOf('Markdown Content:');
+    if (splitIdx !== -1) {
+      content = rawText.slice(splitIdx + 'Markdown Content:'.length).trim();
+    }
+
+    const html = content
+      .split(/\n\n+/)
+      .map(block => {
+        block = block.trim();
+        if (!block) return '';
+        if (block.startsWith('### ')) return `<h3>${escapeHtml(block.slice(4))}</h3>`;
+        if (block.startsWith('## '))  return `<h2>${escapeHtml(block.slice(3))}</h2>`;
+        if (block.startsWith('# '))   return `<h1>${escapeHtml(block.slice(2))}</h1>`;
+        if (block.startsWith('> '))   return `<blockquote>${escapeHtml(block.slice(2))}</blockquote>`;
+        if (block.startsWith('![')) {
+          const m = block.match(/!\[(.*?)\]\((.*?)\)/);
+          if (m) return `<figure><img src="${escapeHtml(m[2])}" alt="${escapeHtml(m[1])}"><figcaption>${escapeHtml(m[1])}</figcaption></figure>`;
+        }
+        return `<p>${escapeHtml(block).replace(/\n/g, '<br>')}</p>`;
+      })
+      .filter(Boolean)
+      .join('');
+
+    return {
+      title: title || '(No title)',
+      content: html,
+      byline: extractHostname(url),
+    };
+  }
+
+  // Wayback Machine — useful for articles archived in the past
   async function fetchFromWayback(targetUrl) {
     statusMsg.textContent = 'Checking Wayback Machine...';
     const availUrl = 'https://archive.org/wayback/available?url=' + encodeURIComponent(targetUrl);
@@ -438,7 +549,6 @@
     const ts = snapshot.timestamp;
     statusMsg.textContent = `Loading archive from ${ts.slice(0,4)}-${ts.slice(4,6)}-${ts.slice(6,8)}...`;
 
-    // Try direct (archive.org allows CORS), then fall through proxies
     try {
       const res = await fetch(snapshotUrl, { signal: AbortSignal.timeout(12000) });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -458,45 +568,65 @@
     emptyState.style.display = 'none';
     showStatus('Fetching article...');
 
-    let html, sourceNote = '';
+    let html = '', parsed = null, sourceNote = '';
 
+    // Step 1: Try public CORS proxies
     try {
       html = await fetchViaProxies(url);
-    } catch (directErr) {
-      console.info('Direct fetch failed, trying Wayback...', directErr.message);
+    } catch (proxyErr) {
+      console.info('Direct proxies failed, trying Jina reader...', proxyErr.message);
+
+      // Step 2: Try Jina Reader
       try {
-        const wb = await fetchFromWayback(url);
-        html = wb.html;
-        const t = wb.timestamp;
-        sourceNote = `archived ${t.slice(0,4)}-${t.slice(4,6)}-${t.slice(6,8)} via Wayback Machine`;
-      } catch (wbErr) {
-        showError(
-          `Could not fetch the article.\n` +
-          `Live: ${directErr.message}\n` +
-          `Archive: ${wbErr.message}\n\n` +
-          (WORKER_URL ? '' : 'Tip: deploy the Cloudflare Worker (see README) for better site support.')
-        );
+        const jinaText = await fetchFromJina(url);
+        if (jinaText.includes('Markdown Content:')) {
+          parsed = parseJinaArticle(jinaText, url);
+          sourceNote = 'processed via Jina Reader';
+        } else {
+          html = jinaText;
+          sourceNote = 'fetched via Jina';
+        }
+      } catch (jinaErr) {
+        console.info('Jina failed, trying Wayback Machine...', jinaErr.message);
+
+        // Step 3: Try Wayback Machine
+        try {
+          const wb = await fetchFromWayback(url);
+          html = wb.html;
+          const t = wb.timestamp;
+          sourceNote = `archived ${t.slice(0,4)}-${t.slice(4,6)}-${t.slice(6,8)} via Wayback Machine`;
+        } catch (wbErr) {
+          showError(
+            `Could not fetch the article directly.\n` +
+            `• Proxies: ${proxyErr.message}\n` +
+            `• Reader proxy: ${jinaErr.message}\n` +
+            `• Wayback Machine: ${wbErr.message}`,
+            url
+          );
+          fetchBtn.disabled = false;
+          return;
+        }
+      }
+    }
+
+    // Step 4: Parse HTML with Readability if not parsed from markdown
+    if (!parsed) {
+      showStatus('Parsing article...');
+      try {
+        const doc = new DOMParser().parseFromString(html, 'text/html');
+        const base = doc.createElement('base');
+        base.href = url;
+        doc.head.prepend(base);
+        parsed = new Readability(doc).parse();
+      } catch (err) {
+        showError(`Parse error: ${err.message}`, url);
         fetchBtn.disabled = false;
         return;
       }
     }
 
-    showStatus('Parsing article...');
-    let parsed;
-    try {
-      const doc = new DOMParser().parseFromString(html, 'text/html');
-      const base = doc.createElement('base');
-      base.href = url;
-      doc.head.prepend(base);
-      parsed = new Readability(doc).parse();
-    } catch (err) {
-      showError(`Parse error: ${err.message}`);
-      fetchBtn.disabled = false;
-      return;
-    }
-
     if (!parsed || !parsed.content) {
-      showError('No readable article content found. The site may require login.');
+      showError('No readable article content found. The site may require login.', url);
       fetchBtn.disabled = false;
       return;
     }
